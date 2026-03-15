@@ -4,11 +4,13 @@ import { Mail, Phone, Lock, User, ShieldCheck, RefreshCw, LogIn, UserPlus, LogOu
 import confetti from 'canvas-confetti';
 
 // --- Types ---
-type AuthMode = 'login' | 'register';
+type AuthMode = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
 interface UserData {
+  id: number;
   email: string;
-  mobile: string;
+  mobile?: string;
+  confirmed?: boolean;
 }
 
 // --- Components ---
@@ -47,6 +49,8 @@ const Button = ({ children, loading, variant = 'primary', ...props }: any) => {
   );
 };
 
+const API_URL = '';
+
 export default function App() {
   const [mode, setMode] = useState<AuthMode>('login');
   const [user, setUser] = useState<UserData | null>(null);
@@ -58,8 +62,10 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [mobile, setMobile] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [resetCode, setResetCode] = useState('');
   const [captchaInput, setCaptchaInput] = useState('');
-  const [captchaValue, setCaptchaValue] = useState('');
+  const [captchaQuestion, setCaptchaQuestion] = useState('');
   const [captchaId, setCaptchaId] = useState('');
 
   // Generate Captcha
@@ -67,20 +73,29 @@ export default function App() {
     try {
       const res = await fetch('/api/auth/captcha');
       const data = await res.json();
-      setCaptchaValue(data.question.split(' ').pop().replace('?', ''));
+      setCaptchaQuestion(data.question);
       setCaptchaId(data.captchaId);
       setCaptchaInput('');
     } catch (err) {
-      console.error('Failed to fetch captcha');
+      console.error('Failed to generate captcha', err);
     }
   };
 
   useEffect(() => {
     generateCaptcha();
+
+    // Check for reset code in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    if (code) {
+      setResetCode(code);
+      setMode('reset-password');
+    }
+
     // Check for existing token
     const token = localStorage.getItem('token');
     if (token) {
-      window.fetch('/api/auth/me', {
+      fetch('/api/auth/me', {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       .then(res => res.json())
@@ -105,22 +120,52 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             email, 
-            mobile, 
-            password, 
-            captchaId, 
-            captchaAnswer: parseInt(captchaInput) 
+            mobile,
+            password,
+            captchaId,
+            captchaAnswer: parseInt(captchaInput)
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Registration failed');
         
-        setSuccess('Registration successful! Please login.');
+        setSuccess('Registration successful! You can now login.');
         setMode('login');
         confetti({
           particleCount: 100,
           spread: 70,
           origin: { y: 0.6 }
         });
+      } else if (mode === 'forgot-password') {
+        const res = await fetch('/api/auth/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to send reset email');
+        }
+        setSuccess('Password reset link sent to your email.');
+      } else if (mode === 'reset-password') {
+        if (password !== confirmPassword) {
+          throw new Error('Passwords do not match');
+        }
+        const res = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            code: resetCode,
+            password
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Reset failed');
+        
+        setSuccess('Password reset successful! You can now login.');
+        setMode('login');
+        // Clear URL params
+        window.history.replaceState({}, document.title, window.location.pathname);
       } else {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
@@ -154,6 +199,28 @@ export default function App() {
     setSuccess('Logged out successfully');
   };
 
+  const handleResendVerification = async () => {
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch('/api/auth/send-email-confirmation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user?.email }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to resend confirmation');
+      }
+      setSuccess('Verification email resent.');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (user) {
     return (
       <div className="min-h-screen bg-[#F5F5F5] flex items-center justify-center p-6 font-sans">
@@ -171,6 +238,21 @@ export default function App() {
           </div>
 
           <div className="bg-zinc-50 rounded-2xl p-6 text-left space-y-4 border border-zinc-100">
+            {!user.confirmed && (
+              <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl flex items-center justify-between gap-3 mb-2">
+                <div className="flex items-center gap-2 text-amber-700 text-xs font-medium">
+                  <AlertCircle size={14} />
+                  Email not verified
+                </div>
+                <button 
+                  onClick={handleResendVerification}
+                  disabled={loading}
+                  className="text-[10px] font-bold text-amber-800 uppercase tracking-widest hover:underline disabled:opacity-50"
+                >
+                  Resend
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-zinc-100">
                 <Mail size={18} className="text-zinc-600" />
@@ -215,12 +297,16 @@ export default function App() {
 
         <div className="space-y-2">
           <h1 className="text-3xl font-bold text-zinc-900 tracking-tight">
-            {mode === 'login' ? 'Sign In' : 'Create Account'}
+            {mode === 'login' && 'Sign In'}
+            {mode === 'register' && 'Create Account'}
+            {mode === 'forgot-password' && 'Reset Password'}
+            {mode === 'reset-password' && 'Set New Password'}
           </h1>
           <p className="text-zinc-500 text-sm">
-            {mode === 'login' 
-              ? 'Enter your credentials to access your Shopify store.' 
-              : 'Join EasyAuth for a secure Shopify experience.'}
+            {mode === 'login' && 'Enter your credentials to access your Shopify store.'}
+            {mode === 'register' && 'Join EasyAuth for a secure Shopify experience.'}
+            {mode === 'forgot-password' && 'Enter your email to receive a reset link.'}
+            {mode === 'reset-password' && 'Enter your new password below.'}
           </p>
         </div>
 
@@ -272,15 +358,41 @@ export default function App() {
             />
           )}
 
-          <Input
-            icon={Lock}
-            label="Password"
-            type="password"
-            placeholder="••••••••"
-            required
-            value={password}
-            onChange={(e: any) => setPassword(e.target.value)}
-          />
+          {(mode === 'login' || mode === 'register' || mode === 'reset-password') && (
+            <Input
+              icon={Lock}
+              label={mode === 'reset-password' ? 'New Password' : 'Password'}
+              type="password"
+              placeholder="••••••••"
+              required
+              value={password}
+              onChange={(e: any) => setPassword(e.target.value)}
+            />
+          )}
+
+          {mode === 'reset-password' && (
+            <Input
+              icon={Lock}
+              label="Confirm New Password"
+              type="password"
+              placeholder="••••••••"
+              required
+              value={confirmPassword}
+              onChange={(e: any) => setConfirmPassword(e.target.value)}
+            />
+          )}
+
+          {mode === 'login' && (
+            <div className="flex justify-end px-1">
+              <button 
+                type="button"
+                onClick={() => setMode('forgot-password')}
+                className="text-xs font-medium text-zinc-500 hover:text-zinc-900 transition-colors"
+              >
+                Forgot Password?
+              </button>
+            </div>
+          )}
 
           {mode === 'register' && (
             <div className="space-y-1.5">
@@ -288,8 +400,8 @@ export default function App() {
                 Human Verification
               </label>
               <div className="flex gap-3">
-                <div className="flex-1 bg-zinc-100 border border-zinc-200 rounded-xl py-3 px-4 flex items-center justify-center font-mono text-xl font-bold tracking-[0.5em] text-zinc-400 select-none italic line-through decoration-zinc-300">
-                  {captchaValue}
+                <div className="flex-1 bg-zinc-100 border border-zinc-200 rounded-xl py-3 px-4 flex items-center justify-center font-mono text-sm font-bold text-zinc-600 select-none">
+                  {captchaQuestion}
                 </div>
                 <button 
                   type="button"
@@ -301,7 +413,7 @@ export default function App() {
               </div>
               <input
                 type="text"
-                placeholder="Enter numbers above"
+                placeholder="Enter answer"
                 className="w-full bg-zinc-50 border border-zinc-200 rounded-xl py-3 px-4 text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/5 focus:border-zinc-900 transition-all text-center font-mono tracking-widest"
                 required
                 value={captchaInput}
@@ -311,8 +423,13 @@ export default function App() {
           )}
 
           <Button loading={loading}>
-            {mode === 'login' ? <LogIn size={18} /> : <UserPlus size={18} />}
-            {mode === 'login' ? 'Sign In' : 'Create Account'}
+            {mode === 'login' && <LogIn size={18} />}
+            {mode === 'register' && <UserPlus size={18} />}
+            {(mode === 'forgot-password' || mode === 'reset-password') && <RefreshCw size={18} />}
+            {mode === 'login' && 'Sign In'}
+            {mode === 'register' && 'Create Account'}
+            {mode === 'forgot-password' && 'Send Reset Link'}
+            {mode === 'reset-password' && 'Update Password'}
           </Button>
         </form>
 
@@ -325,7 +442,9 @@ export default function App() {
             }}
             className="text-sm font-medium text-zinc-500 hover:text-zinc-900 transition-colors"
           >
-            {mode === 'login' ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
+            {mode === 'login' && "Don't have an account? Sign up"}
+            {mode === 'register' && "Already have an account? Sign in"}
+            {(mode === 'forgot-password' || mode === 'reset-password') && "Back to Sign In"}
           </button>
         </div>
       </motion.div>

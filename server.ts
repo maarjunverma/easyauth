@@ -21,12 +21,14 @@ db.exec(`
     email TEXT UNIQUE,
     mobile TEXT UNIQUE,
     password TEXT,
+    confirmed INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
 
-// Simple in-memory store for captchas
+// Simple in-memory store for captchas and reset codes
 const captchaStore = new Map<string, { code: number; expires: number }>();
+const resetStore = new Map<string, { email: string; expires: number }>();
 
 async function startServer() {
   const app = express();
@@ -41,6 +43,51 @@ async function startServer() {
     const code = Math.floor(1000 + Math.random() * 9000); // 4 digit code
     captchaStore.set(captchaId, { code, expires: Date.now() + 5 * 60 * 1000 }); // 5 mins
     res.json({ captchaId, question: `What is the number ${code}?` });
+  });
+
+  // Resend Verification
+  app.post("/api/auth/send-email-confirmation", (req, res) => {
+    const { email } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    
+    // In a real app, send verification email.
+    console.log(`Verification email sent to ${email}`);
+    res.json({ message: "Verification email sent" });
+  });
+
+  // Forgot Password
+  app.post("/api/auth/forgot-password", (req, res) => {
+    const { email } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    
+    // For security, don't reveal if user exists, but here we'll be helpful for the demo
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const resetCode = Math.random().toString(36).substring(2, 15);
+    resetStore.set(resetCode, { email, expires: Date.now() + 15 * 60 * 1000 }); // 15 mins
+
+    // In a real app, send an email. For now, we'll just log it and return it for the demo.
+    console.log(`Password reset link: http://localhost:3000/?code=${resetCode}`);
+    res.json({ message: "Reset link sent to email", debug_link: `/?code=${resetCode}` });
+  });
+
+  // Reset Password
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const { code, password } = req.body;
+    const stored = resetStore.get(code);
+
+    if (!stored || Date.now() > stored.expires) {
+      return res.status(400).json({ error: "Invalid or expired reset code" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    db.prepare("UPDATE users SET password = ? WHERE email = ?").run(hashedPassword, stored.email);
+    resetStore.delete(code);
+
+    res.json({ message: "Password updated successfully" });
   });
 
   // Register
@@ -70,7 +117,7 @@ async function startServer() {
 
       const token = jwt.sign({ id: result.lastInsertRowid, email }, JWT_SECRET, { expiresIn: "24h" });
 
-      res.json({ token, user: { id: result.lastInsertRowid, email, mobile } });
+      res.json({ token, user: { id: result.lastInsertRowid, email, mobile, confirmed: false } });
     } catch (err) {
       res.status(500).json({ error: "Internal server error" });
     }
@@ -93,7 +140,7 @@ async function startServer() {
 
       const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "24h" });
 
-      res.json({ token, user: { id: user.id, email: user.email, mobile: user.mobile } });
+      res.json({ token, user: { id: user.id, email: user.email, mobile: user.mobile, confirmed: !!user.confirmed } });
     } catch (err) {
       res.status(500).json({ error: "Internal server error" });
     }
@@ -107,7 +154,10 @@ async function startServer() {
     const token = authHeader.split(" ")[1];
     try {
       const decoded: any = jwt.verify(token, JWT_SECRET);
-      const user: any = db.prepare("SELECT id, email, mobile FROM users WHERE id = ?").get(decoded.id);
+      const user: any = db.prepare("SELECT id, email, mobile, confirmed FROM users WHERE id = ?").get(decoded.id);
+      if (user) {
+        user.confirmed = !!user.confirmed;
+      }
       res.json({ user });
     } catch (err) {
       res.status(401).json({ error: "Invalid token" });
