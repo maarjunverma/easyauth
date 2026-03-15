@@ -1,0 +1,5 @@
+{
+  "name": "EasyAuth",
+  "description": "A simple authentication Shopify app with email, mobile number, password, and captcha verification.",
+  "requestFramePermissions": []
+}
